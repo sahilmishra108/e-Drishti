@@ -1,5 +1,5 @@
 
-import { supabase } from '@/integrations/supabase/client';
+// import { supabase } from '@/integrations/supabase/client';
 import { ROI } from '@/types/vitals';
 
 export interface OCRProgress {
@@ -40,37 +40,37 @@ const recognizeWithTesseract = async (
     progress: 10,
     message: 'Initializing Tesseract OCR engine...'
   });
-  
+
   await initializeTesseract();
 
-  
+
   onProgress?.({
     status: 'processing',
     progress: 30,
     message: 'Preprocessing image for OCR recognition...'
   });
-  
+
   await new Promise(resolve => setTimeout(resolve, 200));
 
-  
+
   onProgress?.({
     status: 'processing',
     progress: 50,
     message: `Detecting ${rois.length} vital sign regions...`
   });
-  
+
   await new Promise(resolve => setTimeout(resolve, 300));
 
-  
+
   onProgress?.({
     status: 'recognizing',
     progress: 70,
     message: 'Performing OCR recognition on detected regions...'
   });
-  
+
   await new Promise(resolve => setTimeout(resolve, 400));
 
-  
+
   onProgress?.({
     status: 'recognizing',
     progress: 85,
@@ -79,21 +79,24 @@ const recognizeWithTesseract = async (
 
   try {
 
-    const { data, error } = await supabase.functions.invoke('extract-vitals', {
-      body: { imageBase64, rois }
+    // Call local Express backend instead of Supabase
+    const response = await fetch('http://localhost:3000/api/extract-vitals', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ imageBase64, rois })
     });
 
-    if (error) {
-   
-      const errorMessage = error.message || 'Edge Function returned a non-2xx status code';
-      // Don't throw immediately - return empty vitals instead to prevent console spam
-      onProgress?.({
-        status: 'completed',
-        progress: 100,
-        message: 'OCR processing completed with limited data'
-      });
-      
-      // Return empty vitals structure instead of throwing
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`Server error: ${response.status} ${errorText}`);
+    }
+
+    const data = await response.json();
+
+    if (!data.vitals) {
+      // Return empty vitals instead of throwing
       return {
         text: 'Vital signs extraction attempted',
         confidence: 0,
@@ -109,16 +112,16 @@ const recognizeWithTesseract = async (
       };
     }
 
-    
+
     onProgress?.({
       status: 'processing',
       progress: 95,
       message: 'Validating extracted values...'
     });
-    
+
     await new Promise(resolve => setTimeout(resolve, 100));
 
-  
+
     onProgress?.({
       status: 'completed',
       progress: 100,
@@ -142,10 +145,10 @@ const recognizeWithTesseract = async (
       };
     }
 
-  
+
     return {
       text: 'Vital signs extracted from medical monitor display',
-      confidence: 0.95, 
+      confidence: 0.95,
       vitals: data.vitals
     };
   } catch (error) {
@@ -155,7 +158,7 @@ const recognizeWithTesseract = async (
       progress: 100,
       message: 'OCR processing completed'
     });
-    
+
     return {
       text: 'Vital signs extraction attempted',
       confidence: 0,
@@ -228,7 +231,7 @@ export const batchExtractVitals = async (
 
   for (let i = 0; i < images.length; i++) {
     const image = images[i];
-    
+
     onProgress?.(i + 1, images.length, {
       status: 'processing',
       progress: 0,
@@ -245,7 +248,7 @@ export const batchExtractVitals = async (
           message: `[${i + 1}/${images.length}] ${progress.message}`
         });
       });
-      
+
       results.push(result);
     } catch (error) {
       // Silently handle errors - continue with other images

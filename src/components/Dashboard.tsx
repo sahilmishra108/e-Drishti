@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Card } from '@/components/ui/card';
 import { TrendingUp, Filter, Download, RefreshCw } from 'lucide-react';
-import { supabase } from '@/integrations/supabase/client';
+import { io } from 'socket.io-client';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
@@ -46,24 +46,15 @@ const Dashboard = () => {
   useEffect(() => {
     fetchVitalsHistory();
 
-    // Subscribe to real-time updates
-    const channel = supabase
-      .channel('vitals-history-changes')
-      .on(
-        'postgres_changes',
-        {
-          event: 'INSERT',
-          schema: 'public',
-          table: 'vitals'
-        },
-        () => {
-          fetchVitalsHistory();
-        }
-      )
-      .subscribe();
+    // Connect to Socket.io server
+    const socket = io('http://localhost:3000');
+
+    socket.on('vital-update', () => {
+      fetchVitalsHistory();
+    });
 
     return () => {
-      supabase.removeChannel(channel);
+      socket.disconnect();
     };
   }, []);
 
@@ -72,20 +63,14 @@ const Dashboard = () => {
   }, [vitalsHistory, dateFrom, dateTo]);
 
   const fetchVitalsHistory = async () => {
-    const { data, error } = await supabase
-      .from('vitals')
-      .select('*')
-      .in('source', ['camera', 'video']) // Include both camera and video sources
-      .order('created_at', { ascending: true })
-      .limit(1000); // Limit to last 1000 records for performance
-
-    if (error) {
-      // Silently handle fetch errors
-      return;
-    }
-
-    if (data) {
-      setVitalsHistory(data);
+    try {
+      const response = await fetch('http://localhost:3000/api/vitals?limit=1000');
+      if (response.ok) {
+        const data = await response.json();
+        setVitalsHistory(data);
+      }
+    } catch (error) {
+      console.error('Error fetching history:', error);
     }
   };
 
@@ -164,7 +149,7 @@ const Dashboard = () => {
         record.etco2 ?? 'N/A',
         record.awrr ?? 'N/A'
       ]);
-    
+
     const csvContent = [headers, ...rows].map(row => row.join(',')).join('\n');
     const blob = new Blob([csvContent], { type: 'text/csv' });
     const url = URL.createObjectURL(blob);
@@ -177,19 +162,19 @@ const Dashboard = () => {
 
   const getStatusColor = (value: number | null, type: 'hr' | 'spo2' | 'etco2' | 'awrr') => {
     if (value === null) return 'text-muted-foreground';
-    
+
     if (type === 'hr') {
       if (value < 60 || value > 100) return 'text-red-600 font-semibold';
       if (value < 70 || value > 90) return 'text-yellow-600';
       return 'text-green-600';
     }
-    
+
     if (type === 'spo2') {
       if (value < 90) return 'text-red-600 font-semibold';
       if (value < 95) return 'text-yellow-600';
       return 'text-green-600';
     }
-    
+
     return 'text-foreground';
   };
 
@@ -197,9 +182,9 @@ const Dashboard = () => {
     <div className="space-y-6">
       {/* Banner Image */}
       <div className="relative w-full h-64 md:h-80 rounded-lg overflow-hidden">
-        <img 
-          src="/Gemini_Generated_Image_6xwqr56xwqr56xwq.png" 
-          alt="Patient Monitoring" 
+        <img
+          src="/Gemini_Generated_Image_6xwqr56xwqr56xwq.png"
+          alt="Patient Monitoring"
           className="w-full h-full object-cover"
         />
         <div className="absolute inset-0 bg-gradient-to-t from-black/60 to-transparent flex items-end">
@@ -310,11 +295,11 @@ const Dashboard = () => {
             <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
             <XAxis dataKey="time" stroke="hsl(var(--muted-foreground))" />
             <YAxis stroke="hsl(var(--muted-foreground))" />
-            <Tooltip 
-              contentStyle={{ 
-                backgroundColor: 'hsl(var(--card))', 
-                border: '1px solid hsl(var(--border))' 
-              }} 
+            <Tooltip
+              contentStyle={{
+                backgroundColor: 'hsl(var(--card))',
+                border: '1px solid hsl(var(--border))'
+              }}
             />
             <Legend />
             <Line type="monotone" dataKey="HR" stroke="hsl(var(--primary))" strokeWidth={2} />
@@ -330,11 +315,11 @@ const Dashboard = () => {
             <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
             <XAxis dataKey="time" stroke="hsl(var(--muted-foreground))" />
             <YAxis stroke="hsl(var(--muted-foreground))" />
-            <Tooltip 
-              contentStyle={{ 
-                backgroundColor: 'hsl(var(--card))', 
-                border: '1px solid hsl(var(--border))' 
-              }} 
+            <Tooltip
+              contentStyle={{
+                backgroundColor: 'hsl(var(--card))',
+                border: '1px solid hsl(var(--border))'
+              }}
             />
             <Legend />
             <Line type="monotone" dataKey="SpO2" stroke="hsl(var(--chart-2))" strokeWidth={2} />
@@ -396,21 +381,20 @@ const Dashboard = () => {
                   .reverse()
                   .slice(0, 100)
                   .map((record, index) => (
-                    <TableRow 
-                      key={record.id || index} 
+                    <TableRow
+                      key={record.id || index}
                       className="hover:bg-muted/30 transition-colors"
                     >
                       <TableCell className="font-medium text-foreground">
                         {new Date(record.created_at).toLocaleString()}
                       </TableCell>
                       <TableCell>
-                        <span className={`px-2 py-1 rounded-full text-xs font-medium ${
-                          record.source === 'camera' 
-                            ? 'bg-blue-100 text-blue-700' 
+                        <span className={`px-2 py-1 rounded-full text-xs font-medium ${record.source === 'camera'
+                            ? 'bg-blue-100 text-blue-700'
                             : record.source === 'video'
-                            ? 'bg-green-100 text-green-700'
-                            : 'bg-gray-100 text-gray-700'
-                        }`}>
+                              ? 'bg-green-100 text-green-700'
+                              : 'bg-gray-100 text-gray-700'
+                          }`}>
                           {record.source?.toUpperCase() || 'N/A'}
                         </span>
                       </TableCell>

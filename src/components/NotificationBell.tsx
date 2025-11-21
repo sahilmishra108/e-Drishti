@@ -7,7 +7,7 @@ import {
   PopoverTrigger,
 } from '@/components/ui/popover';
 import VitalNotifications from './VitalNotifications';
-import { supabase } from '@/integrations/supabase/client';
+import { io } from 'socket.io-client';
 
 interface VitalRecord {
   created_at: string;
@@ -42,49 +42,36 @@ const NotificationBell = () => {
     // Fetch latest vitals
     fetchLatestVitals();
 
-    // Subscribe to real-time updates
-    const channel = supabase
-      .channel('vitals-notifications')
-      .on(
-        'postgres_changes',
-        {
-          event: 'INSERT',
-          schema: 'public',
-          table: 'vitals'
-        },
-        () => {
-          fetchLatestVitals();
-        }
-      )
-      .subscribe();
+    // Connect to Socket.io server
+    const socket = io('http://localhost:3000');
 
-    // Poll for updates every 3 seconds
+    socket.on('vital-update', () => {
+      fetchLatestVitals();
+    });
+
+    // Poll for updates every 3 seconds (fallback)
     const pollInterval = setInterval(() => {
       fetchLatestVitals();
     }, 3000);
 
     return () => {
-      supabase.removeChannel(channel);
+      socket.disconnect();
       clearInterval(pollInterval);
     };
   }, []);
 
   const fetchLatestVitals = async () => {
-    const { data, error } = await supabase
-      .from('vitals')
-      .select('*')
-      .in('source', ['camera', 'video'])
-      .order('created_at', { ascending: false })
-      .limit(10);
-
-    if (error) {
+    try {
+      const response = await fetch('http://localhost:3000/api/vitals?limit=10');
+      if (response.ok) {
+        const data = await response.json();
+        if (data && data.length > 0) {
+          setVitals(data.reverse());
+          calculateAlertCount(data[data.length - 1]);
+        }
+      }
+    } catch (error) {
       // Silently handle fetch errors
-      return;
-    }
-
-    if (data && data.length > 0) {
-      setVitals(data.reverse());
-      calculateAlertCount(data[data.length - 1]);
     }
   };
 
@@ -172,4 +159,3 @@ const NotificationBell = () => {
 };
 
 export default NotificationBell;
-

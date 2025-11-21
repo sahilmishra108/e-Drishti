@@ -3,7 +3,7 @@ import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Upload, FileVideo, Download, Loader2, FileSpreadsheet } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
-import { supabase } from '@/integrations/supabase/client';
+import { io } from 'socket.io-client';
 import { batchExtractVitals, OCRProgress } from '@/lib/ocr';
 import { monitorROIs, VitalsData } from '@/types/vitals';
 import {
@@ -26,35 +26,29 @@ const VideoProcessor = () => {
   const { toast } = useToast();
 
   useEffect(() => {
-    // Subscribe to real-time updates for video source vitals
-    const channel = supabase
-      .channel('video-vitals-changes')
-      .on(
-        'postgres_changes',
-        {
-          event: 'INSERT',
-          schema: 'public',
-          table: 'vitals',
-          filter: 'source=eq.video'
-        },
-        (payload) => {
-          if (payload.new) {
-            setLatestVitals({
-              HR: payload.new.hr,
-              Pulse: payload.new.pulse,
-              SpO2: payload.new.spo2,
-              ABP: payload.new.abp,
-              PAP: payload.new.pap,
-              EtCO2: payload.new.etco2,
-              awRR: payload.new.awrr
-            });
-          }
-        }
-      )
-      .subscribe();
+    // Connect to Socket.io server
+    const socket = io('http://localhost:3000');
+
+    socket.on('connect', () => {
+      console.log('Connected to WebSocket server');
+    });
+
+    socket.on('vital-update', (newVital: any) => {
+      if (newVital.source === 'video') {
+        setLatestVitals({
+          HR: newVital.hr,
+          Pulse: newVital.pulse,
+          SpO2: newVital.spo2,
+          ABP: newVital.abp,
+          PAP: newVital.pap,
+          EtCO2: newVital.etco2,
+          awRR: newVital.awrr
+        });
+      }
+    });
 
     return () => {
-      supabase.removeChannel(channel);
+      socket.disconnect();
     };
   }, []);
 
@@ -71,10 +65,10 @@ const VideoProcessor = () => {
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
     setIsDragging(false);
-    
+
     const files = Array.from(e.dataTransfer.files);
     const videoFile = files.find(file => file.type.startsWith('video/'));
-    
+
     if (videoFile) {
       setVideoFile(videoFile);
       setAllExtractedVitals([]);
@@ -121,23 +115,23 @@ const VideoProcessor = () => {
 
   const processVideo = async () => {
     if (!videoFile) return;
-    
+
     setIsProcessing(true);
     setProgress(0);
-    
+
     try {
       const video = document.createElement('video');
       video.src = URL.createObjectURL(videoFile);
-      
+
       await new Promise((resolve) => {
         video.onloadedmetadata = resolve;
       });
-      
+
       const duration = video.duration;
       const frameInterval = 3; // Extract frame every 3 seconds
       const totalFrames = Math.floor(duration / frameInterval);
       const allVitals: Array<VitalsData & { timestamp: number }> = [];
-      
+
       // Extract all frames first
       const frames: string[] = [];
       for (let i = 0; i < totalFrames; i++) {
@@ -179,13 +173,13 @@ const VideoProcessor = () => {
       }> = [];
 
       const extractedVitalsWithTime: Array<VitalsData & { timestamp: number; timeString: string }> = [];
-      
+
       for (let i = 0; i < ocrResults.length; i++) {
         const time = i * frameInterval;
         if (ocrResults[i].vitals) {
           const vitals = ocrResults[i].vitals;
           const timeString = `${Math.floor(time / 60)}:${String(Math.floor(time % 60)).padStart(2, '0')}`;
-          
+
           allVitals.push({
             ...vitals,
             timestamp: time
@@ -220,37 +214,46 @@ const VideoProcessor = () => {
       // Update all extracted vitals for table display
       setAllExtractedVitals(extractedVitalsWithTime);
 
-      // Store all vitals in database
+      // Store all vitals in database via API
       if (vitalsToInsert.length > 0) {
-        const { error: insertError } = await supabase
-          .from('vitals')
-          .insert(vitalsToInsert);
+        try {
+          const response = await fetch('http://localhost:3000/api/vitals', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(vitalsToInsert)
+          });
 
-        if (insertError) {
+          if (!response.ok) {
+            throw new Error('Failed to save vitals');
+          }
+
+          toast({
+            title: "Success",
+            description: `Extracted and saved ${vitalsToInsert.length} vitals to dashboard`,
+          });
+        } catch (error) {
+          console.error('Save error:', error);
           toast({
             title: "Warning",
             description: "Vitals extracted but failed to save to dashboard. CSV download available.",
             variant: "destructive",
           });
-        } else {
-          toast({
-            title: "Success",
-            description: `Extracted and saved ${vitalsToInsert.length} vitals to dashboard`,
-          });
         }
       }
-      
+
       // Generate CSV
       const csvContent = generateCSV(allVitals);
       downloadCSV(csvContent, `vitals-${Date.now()}.csv`);
-      
+
       if (vitalsToInsert.length === 0) {
         toast({
           title: "Processing complete",
           description: `Extracted ${allVitals.length} data points`,
         });
       }
-      
+
       URL.revokeObjectURL(video.src);
     } catch (error) {
       toast({
@@ -276,7 +279,7 @@ const VideoProcessor = () => {
       row.EtCO2 ?? 'N/A',
       row.awRR ?? 'N/A'
     ]);
-    
+
     return [headers, ...rows].map(row => row.join(',')).join('\n');
   };
 
@@ -296,16 +299,15 @@ const VideoProcessor = () => {
         <FileVideo className="w-6 h-6 text-primary" />
         Video Analysis
       </h2>
-      
+
       <div
         onDragOver={handleDragOver}
         onDragLeave={handleDragLeave}
         onDrop={handleDrop}
-        className={`border-2 border-dashed rounded-lg p-12 text-center transition-colors ${
-          isDragging 
-            ? 'border-primary bg-primary/5' 
+        className={`border-2 border-dashed rounded-lg p-12 text-center transition-colors ${isDragging
+            ? 'border-primary bg-primary/5'
             : 'border-border hover:border-primary/50'
-        }`}
+          }`}
       >
         <input
           type="file"
@@ -314,7 +316,7 @@ const VideoProcessor = () => {
           className="hidden"
           id="video-upload"
         />
-        
+
         <label htmlFor="video-upload" className="cursor-pointer">
           <Upload className="w-16 h-16 mx-auto mb-4 text-muted-foreground" />
           <p className="text-lg font-medium text-foreground mb-2">
@@ -325,7 +327,7 @@ const VideoProcessor = () => {
           </p>
         </label>
       </div>
-      
+
       {videoFile && (
         <div className="mt-6 space-y-4">
           <div className="flex items-center justify-between p-4 bg-muted rounded-lg">
@@ -338,9 +340,9 @@ const VideoProcessor = () => {
                 </p>
               </div>
             </div>
-            
-            <Button 
-              onClick={processVideo} 
+
+            <Button
+              onClick={processVideo}
               disabled={isProcessing}
               className="bg-primary hover:bg-primary/90"
             >
@@ -357,11 +359,11 @@ const VideoProcessor = () => {
               )}
             </Button>
           </div>
-          
+
           {isProcessing && (
             <div className="space-y-2">
               <div className="w-full bg-muted rounded-full h-2 overflow-hidden">
-                <div 
+                <div
                   className="h-full bg-primary transition-all duration-300"
                   style={{ width: `${progress}%` }}
                 />
@@ -398,7 +400,7 @@ const VideoProcessor = () => {
               Export Table to CSV
             </Button>
           </div>
-          
+
           <Card className="border-border">
             <div className="overflow-x-auto max-h-[600px] overflow-y-auto">
               <Table>
