@@ -1,3 +1,4 @@
+
 import { useState } from 'react';
 import { Button } from '@/components/ui/button';
 import {
@@ -16,9 +17,10 @@ import { toast } from 'sonner';
 
 interface AddPatientDialogProps {
     onPatientAdded: () => void;
+    icuId?: number;
 }
 
-const AddPatientDialog = ({ onPatientAdded }: AddPatientDialogProps) => {
+const AddPatientDialog = ({ onPatientAdded, icuId }: AddPatientDialogProps) => {
     const [open, setOpen] = useState(false);
     const [loading, setLoading] = useState(false);
     const [formData, setFormData] = useState({
@@ -33,6 +35,13 @@ const AddPatientDialog = ({ onPatientAdded }: AddPatientDialogProps) => {
         e.preventDefault();
         setLoading(true);
 
+        // Ensure ICU ID is available
+        if (!icuId) {
+            toast.error("ICU context is missing. Please select an ICU first.");
+            setLoading(false);
+            return;
+        }
+
         try {
             const response = await fetch('http://localhost:3000/api/patients', {
                 method: 'POST',
@@ -42,6 +51,7 @@ const AddPatientDialog = ({ onPatientAdded }: AddPatientDialogProps) => {
                 body: JSON.stringify({
                     ...formData,
                     age: parseInt(formData.age),
+                    icu_id: icuId
                 }),
             });
 
@@ -86,7 +96,7 @@ const AddPatientDialog = ({ onPatientAdded }: AddPatientDialogProps) => {
                 <DialogHeader>
                     <DialogTitle className="text-2xl font-bold">Add New Patient</DialogTitle>
                     <DialogDescription>
-                        Enter patient details to create a new record in the system.
+                        Enter patient details to create a new record in the current ICU.
                     </DialogDescription>
                 </DialogHeader>
                 <form onSubmit={handleSubmit}>

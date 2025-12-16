@@ -66,11 +66,11 @@ const DashboardPage = () => {
                 </TabsTrigger>
                 <TabsTrigger value="camera" className="flex items-center gap-2 data-[state=active]:bg-white data-[state=active]:text-primary">
                   <Camera className="w-4 h-4" />
-                  Camera
+                  Live Camera Feed
                 </TabsTrigger>
                 <TabsTrigger value="video" className="flex items-center gap-2 data-[state=active]:bg-white data-[state=active]:text-primary">
                   <FileVideo className="w-4 h-4" />
-                  Video
+                  Video Analysis
                 </TabsTrigger>
               </TabsList>
             </div>
@@ -80,7 +80,13 @@ const DashboardPage = () => {
             </TabsContent>
 
             <TabsContent value="camera" className="space-y-6 animate-scale-in">
-              <CameraFeed patientId={searchParams.get("patientId")} />
+              <div className="flex justify-between items-center">
+                <h2 className="text-xl font-bold text-foreground">Camera Feed</h2>
+              </div>
+
+              <div className="grid grid-cols-1 gap-6">
+                <CameraFeed patientId={searchParams.get("patientId")} />
+              </div>
             </TabsContent>
 
             <TabsContent value="video" className="space-y-6 animate-scale-in">

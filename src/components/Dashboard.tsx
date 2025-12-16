@@ -38,6 +38,8 @@ interface Patient {
   diagnosis: string;
   admission_date: string;
   bed_id: number | null;
+  bed_number?: string;
+  icu_name?: string;
 }
 
 interface DashboardProps {
@@ -275,10 +277,16 @@ const Dashboard = ({ patientId }: DashboardProps) => {
               {patient ? (
                 <>
                   <span className="font-semibold text-white">{patient.diagnosis}</span>
-                  {patient.bed_id && (
+                  {patient.icu_name && (
                     <>
                       <span className="mx-2">•</span>
-                      <span className="font-semibold text-white">Bed {patient.bed_id}</span>
+                      <span className="font-semibold text-white">{patient.icu_name}</span>
+                    </>
+                  )}
+                  {patient.bed_number && (
+                    <>
+                      <span className="mx-2">•</span>
+                      <span className="font-semibold text-white">Bed {patient.bed_number}</span>
                     </>
                   )}
                   <span className="mx-2">•</span>

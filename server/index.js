@@ -6,6 +6,7 @@ import dotenv from 'dotenv';
 import mysql from 'mysql2/promise';
 import { HfInference } from '@huggingface/inference';
 import Tesseract from 'tesseract.js';
+import cron from 'node-cron';
 
 import path from 'path';
 import fs from 'fs';
@@ -16,21 +17,21 @@ const __dirname = path.dirname(__filename);
 
 const configPath = path.resolve(__dirname, 'config.env');
 const envPath = fs.existsSync(configPath) ? configPath : path.resolve(__dirname, '.env');
-console.log('Loading environment from:', envPath);
+
 
 dotenv.config({ path: envPath });
 
-console.log('--- Environment Check ---');
-console.log('HF_ACCESS_TOKEN present:', !!process.env.HF_ACCESS_TOKEN);
-if (process.env.HF_ACCESS_TOKEN) {
-  console.log('HF_ACCESS_TOKEN prefix:', process.env.HF_ACCESS_TOKEN.substring(0, 3));
-  if (!process.env.HF_ACCESS_TOKEN.startsWith('hf_')) {
-    console.warn('WARNING: HF_ACCESS_TOKEN does not start with "hf_". This may cause issues with the Hugging Face Inference API.');
-  }
-} else {
-  console.warn('WARNING: HF_ACCESS_TOKEN is missing. Hugging Face VLM extraction will likely fail.');
-}
-console.log('-------------------------');
+console.log('--- Server Startup Config Check ---');
+console.log('HF_ACCESS_TOKEN:', process.env.HF_ACCESS_TOKEN ? 'Loaded (Starts with ' + process.env.HF_ACCESS_TOKEN.substring(0, 3) + '...)' : 'MISSING');
+console.log('GEMINI_API_KEY:', process.env.GEMINI_API_KEY ? 'Loaded' : 'MISSING');
+console.log('DB Connection:', {
+  host: process.env.DB_HOST || 'localhost',
+  user: process.env.DB_USER || 'root',
+  db: process.env.DB_NAME || 'vitalview'
+});
+console.log('-----------------------------------');
+
+
 
 const app = express();
 const httpServer = createServer(app);
@@ -81,15 +82,29 @@ const ALERT_RANGES = {
 };
 
 // Rate limiting: Map<"patientId-vitalType", timestamp>
-const lastAlertTime = new Map();
-const ALERT_COOLDOWN = 5 * 60 * 1000; // 5 minutes
+// Now changed to state tracking to only alert on status change
+const vitalStateMap = new Map();
 
 async function checkAndAlert(vital, patientId) {
-  const alerts = [];
+  const alertsToSend = [];
 
   const check = (type, value, range) => {
-    if (value !== null && (value < range.low || value > range.high)) {
-      alerts.push({ type, value, condition: value < range.low ? 'Low' : 'High' });
+    if (value === null || value === undefined) return;
+
+    let currentCondition = 'Normal';
+    if (value < range.low) currentCondition = 'Low';
+    else if (value > range.high) currentCondition = 'High';
+
+    const key = `${patientId}-${type}`;
+    const previousCondition = vitalStateMap.get(key) || 'Normal';
+
+    // Update state
+    vitalStateMap.set(key, currentCondition);
+
+    // Alert only on state change to Abnormal (Normal -> Abnormal or Abnormal -> Different Abnormal)
+    // If it stays High -> High, no new email.
+    if (currentCondition !== 'Normal' && currentCondition !== previousCondition) {
+      alertsToSend.push({ type, value, condition: currentCondition });
     }
   };
 
@@ -99,46 +114,56 @@ async function checkAndAlert(vital, patientId) {
   check('EtCO2', vital.etco2, ALERT_RANGES.EtCO2);
   check('awRR', vital.awrr, ALERT_RANGES.awRR);
 
-  if (alerts.length === 0) return;
+  if (alertsToSend.length === 0) return;
 
-  // Fetch Patient Name
+  // Fetch Patient Details including ICU
   let patientName = 'Unknown Patient';
+  let icuName = 'Unknown ICU';
+  let icuId = 'N/A';
+  let bedNumber = 'N/A';
+
   try {
-    const [rows] = await pool.query('SELECT patient_name FROM patients WHERE patient_id = ?', [patientId]);
+    const [rows] = await pool.query(`
+      SELECT p.patient_name, i.icu_name, i.icu_id, b.bed_number
+      FROM patients p 
+      LEFT JOIN icus i ON p.icu_id = i.icu_id
+      LEFT JOIN beds b ON p.patient_id = b.patient_id
+      WHERE p.patient_id = ?
+    `, [patientId]);
+
     if (rows.length > 0) {
       patientName = rows[0].patient_name;
+      icuName = rows[0].icu_name || 'No ICU';
+      icuId = rows[0].icu_id || 'N/A';
+      bedNumber = rows[0].bed_number || 'N/A';
     }
   } catch (err) {
-    console.error('Error fetching patient name for alert:', err);
+    console.error('Error fetching patient details for alert:', err);
   }
 
-  for (const alert of alerts) {
-    const key = `${patientId}-${alert.type}`;
-    const now = Date.now();
-    const lastTime = lastAlertTime.get(key) || 0;
+  for (const alert of alertsToSend) {
+    // Send Email
+    const mailOptions = {
+      from: process.env.EMAIL_USER,
+      to: DOCTOR_EMAIL,
+      subject: `ALERT: ${patientName} (ID: ${patientId}) - ${alert.type} ${alert.condition}`,
+      text: `CRITICAL VITAL SIGN ALERT\n\n` +
+        `Patient Name: ${patientName}\n` +
+        `Patient ID:   ${patientId}\n` +
+        `ICU Name:     ${icuName}\n` +
+        `ICU ID:       ${icuId}\n` +
+        `Bed Number:   ${bedNumber}\n\n` +
+        `Vital Sign:   ${alert.type}\n` +
+        `Status:       ${alert.condition} (${alert.value})\n` +
+        `Timestamp:    ${new Date().toLocaleString()}\n` +
+        `Please attend to the patient immediately.`
+    };
 
-    if (now - lastTime > ALERT_COOLDOWN) {
-      // Send Email
-      const mailOptions = {
-        from: process.env.EMAIL_USER,
-        to: DOCTOR_EMAIL,
-        subject: `ALERT: ${patientName} (ID: ${patientId}) - ${alert.type} ${alert.condition}`,
-        text: `CRITICAL VITAL SIGN ALERT\n\n` +
-          `Patient Name: ${patientName}\n` +
-          `Patient ID:   ${patientId}\n\n` +
-          `Vital Sign:   ${alert.type}\n` +
-          `Status:       ${alert.condition} (${alert.value})\n` +
-          `Timestamp:    ${new Date().toLocaleString()}\n` +
-          `Please attend to the patient immediately.`
-      };
-
-      try {
-        await emailTransporter.sendMail(mailOptions);
-        console.log(`Alert email sent for Patient ${patientId} (${patientName}) - ${alert.type}`);
-        lastAlertTime.set(key, now);
-      } catch (error) {
-        console.error('Failed to send alert email:', error);
-      }
+    try {
+      await emailTransporter.sendMail(mailOptions);
+      console.log(`Alert email sent for Patient ${patientId} (${patientName}) in ${icuName} - ${alert.type} (${alert.condition})`);
+    } catch (error) {
+      console.error('Failed to send alert email:', error);
     }
   }
 }
@@ -189,9 +214,10 @@ app.get('/', (req, res) => {
 app.get('/api/patients', async (req, res) => {
   try {
     const [rows] = await pool.query(`
-            SELECT p.*, b.bed_id 
+            SELECT p.*, b.bed_id, b.bed_number, i.icu_name 
             FROM patients p 
             LEFT JOIN beds b ON p.patient_id = b.patient_id 
+            LEFT JOIN icus i ON p.icu_id = i.icu_id
             ORDER BY p.patient_name
         `);
     res.json(rows);
@@ -204,7 +230,14 @@ app.get('/api/patients', async (req, res) => {
 // Get Single Patient
 app.get('/api/patients/:id', async (req, res) => {
   try {
-    const [rows] = await pool.query('SELECT * FROM patients WHERE patient_id = ?', [req.params.id]);
+    const query = `
+      SELECT p.*, b.bed_id, b.bed_number, i.icu_name 
+      FROM patients p 
+      LEFT JOIN beds b ON p.patient_id = b.patient_id
+      LEFT JOIN icus i ON p.icu_id = i.icu_id
+      WHERE p.patient_id = ?
+    `;
+    const [rows] = await pool.query(query, [req.params.id]);
     if (rows.length === 0) {
       return res.status(404).json({ error: 'Patient not found' });
     }
@@ -221,31 +254,35 @@ app.post('/api/patients', async (req, res) => {
   try {
     await connection.beginTransaction();
 
-    const { patient_name, age, gender, diagnosis, admission_date } = req.body;
+    const { patient_name, age, gender, diagnosis, admission_date, icu_id } = req.body;
 
-    if (!patient_name || !age || !gender || !diagnosis || !admission_date) {
-      return res.status(400).json({ error: 'All fields are required' });
+    if (!patient_name || !age || !gender || !diagnosis || !admission_date || !icu_id) {
+      return res.status(400).json({ error: 'All fields are required, including ICU ID' });
     }
 
     // 1. Insert the new patient
     const query = `
-            INSERT INTO patients (patient_name, age, gender, diagnosis, admission_date)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO patients (patient_name, age, gender, diagnosis, admission_date, icu_id)
+            VALUES (?, ?, ?, ?, ?, ?)
         `;
-    const [result] = await connection.query(query, [patient_name, age, gender, diagnosis, admission_date]);
+    const [result] = await connection.query(query, [patient_name, age, gender, diagnosis, admission_date, icu_id]);
     const newPatientId = result.insertId;
 
-    // 2. Find the first available bed (where patient_id is NULL)
-    const [availableBeds] = await connection.query('SELECT bed_id FROM beds WHERE patient_id IS NULL LIMIT 1');
+    // 2. Find the first available bed in the SPECIFIC ICU
+    // We sort by length of bed_number then bed_number to handle "1", "2", "10" correctly roughly, or just simple sort
+    const [availableBeds] = await connection.query(
+      'SELECT bed_id FROM beds WHERE icu_id = ? AND patient_id IS NULL ORDER BY CAST(bed_number AS UNSIGNED) ASC LIMIT 1',
+      [icu_id]
+    );
 
     let assignedBedId = null;
     if (availableBeds.length > 0) {
       assignedBedId = availableBeds[0].bed_id;
       // 3. Assign the bed to the new patient
       await connection.query('UPDATE beds SET patient_id = ? WHERE bed_id = ?', [newPatientId, assignedBedId]);
-      console.log(`Assigned Bed #${assignedBedId} to new Patient #${newPatientId}`);
+      console.log(`Assigned Bed #${assignedBedId} to new Patient #${newPatientId} in ICU #${icu_id}`);
     } else {
-      console.log(`No available beds for new Patient #${newPatientId}`);
+      console.log(`No available beds for new Patient #${newPatientId} in ICU #${icu_id}`);
     }
 
     await connection.commit();
@@ -474,7 +511,12 @@ Example valid output:
         return res.json({ vitals, source: 'huggingface' });
       }
     } catch (hfError) {
-      console.error('Hugging Face VLM failed, falling back to Tesseract + Gemini:', hfError.message);
+      console.error('Hugging Face VLM failed:', hfError.message);
+      if (hfError.response) {
+        console.error('HF API Status:', hfError.response.status);
+        console.error('HF API Data:', await hfError.response.text());
+      }
+      console.log('Falling back to Tesseract + Gemini...');
     }
 
     // 2. Fallback: Run both Tesseract and Gemini in parallel
@@ -595,7 +637,7 @@ async function extractWithGemini(imageBase64) {
   }
 
   const genAI = new GoogleGenerativeAI(geminiApiKey);
-  const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+  const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
 
   // Convert base64 to proper format for Gemini
   const imageData = imageBase64.replace(/^data:image\/\w+;base64,/, '');
@@ -762,9 +804,115 @@ app.post('/api/vitals', async (req, res) => {
   }
 });
 
+// Get ICUs
+app.get('/api/icus', async (req, res) => {
+  try {
+    const [rows] = await pool.query('SELECT * FROM icus ORDER BY icu_name');
+    res.json(rows);
+  } catch (error) {
+    console.error('Error fetching ICUs:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Create ICU
+app.post('/api/icus', async (req, res) => {
+  try {
+    const { icu_name, location } = req.body;
+    if (!icu_name) {
+      return res.status(400).json({ error: 'ICU Name is required' });
+    }
+    const [result] = await pool.query('INSERT INTO icus (icu_name, location) VALUES (?, ?)', [icu_name, location]);
+    const newIcuId = result.insertId;
+
+    // Seed 10 beds for the new ICU automatically
+    const bedValues = [];
+    for (let i = 1; i <= 10; i++) {
+      bedValues.push([newIcuId, `${i}`, null]);
+    }
+    if (bedValues.length > 0) {
+      await pool.query('INSERT INTO beds (icu_id, bed_number, patient_id) VALUES ?', [bedValues]);
+      console.log(`Seeded 10 beds for new ICU #${newIcuId}`);
+    }
+
+    res.status(201).json({ message: 'ICU created', icuId: newIcuId });
+  } catch (error) {
+    console.error('Error creating ICU:', error);
+    if (error.code === 'ER_DUP_ENTRY') {
+      return res.status(409).json({ error: 'ICU Name already exists' });
+    }
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Schedule Daily Data Summarization & Cleanup (Run at midnight)
+cron.schedule('0 0 * * *', async () => {
+  console.log('Running daily vital summarization and cleanup...');
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+
+    // 1. Summarize data older than 24 hours
+    const summaryQuery = `
+      INSERT INTO daily_vital_summaries 
+      (patient_id, summary_date, hr_min, hr_max, pulse_min, pulse_max, spo2_min, spo2_max, etco2_min, etco2_max, awrr_min, awrr_max)
+      SELECT 
+        patient_id, 
+        DATE(created_at) as summary_date,
+        MIN(hr) as hr_min, MAX(hr) as hr_max,
+        MIN(pulse) as pulse_min, MAX(pulse) as pulse_max,
+        MIN(spo2) as spo2_min, MAX(spo2) as spo2_max,
+        MIN(etco2) as etco2_min, MAX(etco2) as etco2_max,
+        MIN(awrr) as awrr_min, MAX(awrr) as awrr_max
+      FROM vitals
+      WHERE created_at < NOW() - INTERVAL 1 DAY
+      GROUP BY patient_id, DATE(created_at)
+      ON DUPLICATE KEY UPDATE
+        hr_min = LEAST(hr_min, VALUES(hr_min)), hr_max = GREATEST(hr_max, VALUES(hr_max)),
+        pulse_min = LEAST(pulse_min, VALUES(pulse_min)), pulse_max = GREATEST(pulse_max, VALUES(pulse_max)),
+        spo2_min = LEAST(spo2_min, VALUES(spo2_min)), spo2_max = GREATEST(spo2_max, VALUES(spo2_max)),
+        etco2_min = LEAST(etco2_min, VALUES(etco2_min)), etco2_max = GREATEST(etco2_max, VALUES(etco2_max)),
+        awrr_min = LEAST(awrr_min, VALUES(awrr_min)), awrr_max = GREATEST(awrr_max, VALUES(awrr_max));
+    `;
+
+    // We use ON DUPLICATE KEY UPDATE in case the cron runs multiple times or overlaps, updating the summary.
+    // Ideally we are processing specific old records, but simple Group By Day is safer.
+
+    await connection.query(summaryQuery);
+    console.log('Summarization complete.');
+
+    // 2. Delete raw data older than 24 hours
+    // NOTE: This permanently removes detailed records.
+    const [deleteResult] = await connection.query('DELETE FROM vitals WHERE created_at < NOW() - INTERVAL 1 DAY');
+    console.log(`Cleanup complete. Deleted ${deleteResult.affectedRows} old vital records.`);
+
+    await connection.commit();
+  } catch (error) {
+    await connection.rollback();
+    console.error('Error during data cleanup:', error);
+  } finally {
+    connection.release();
+  }
+});
+
 // Start Server
 httpServer.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
+});
+
+// Delete ICU
+app.delete('/api/icus/:id', async (req, res) => {
+  try {
+    const icuId = req.params.id;
+    const [result] = await pool.query('DELETE FROM icus WHERE icu_id = ?', [icuId]);
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ error: 'ICU not found' });
+    }
+    res.json({ message: 'ICU deleted successfully' });
+  } catch (error) {
+    console.error('Error deleting ICU:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 

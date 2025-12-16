@@ -1,7 +1,14 @@
 import { useState, useRef, useEffect } from 'react';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
-import { Camera, Square, Loader2, AlertTriangle, Activity } from 'lucide-react';
+import { Camera, Square, Loader2, AlertTriangle, Activity, RefreshCw } from 'lucide-react';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
 import { useToast } from '@/hooks/use-toast';
 import { io } from 'socket.io-client';
 import { extractVitalsWithOCR, OCRProgress } from '@/lib/ocr';
@@ -15,6 +22,8 @@ interface CameraFeedProps {
 
 const CameraFeed = ({ patientId }: CameraFeedProps) => {
   const [isCapturing, setIsCapturing] = useState(false);
+  const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
+  const [selectedDeviceId, setSelectedDeviceId] = useState<string>('');
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
   const [ocrProgress, setOcrProgress] = useState<OCRProgress | null>(null);
@@ -33,6 +42,31 @@ const CameraFeed = ({ patientId }: CameraFeedProps) => {
     if (patientId) {
       socket.emit('join-patient', patientId);
     }
+
+    // Get available cameras
+    const getCameras = async () => {
+      try {
+        // Request permission primarily to get labels, then stop immediately to release lock
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+          stream.getTracks().forEach(track => track.stop());
+        } catch (err) {
+          console.warn("Could not get initial camera permission or stream:", err);
+        }
+
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const videoDevices = devices.filter(device => device.kind === 'videoinput');
+        setDevices(videoDevices);
+
+        if (videoDevices.length > 0 && !selectedDeviceId) {
+          setSelectedDeviceId(videoDevices[0].deviceId);
+        }
+      } catch (err) {
+        console.error("Error enumerating devices:", err);
+      }
+    };
+
+    getCameras();
 
     socket.on('vital-update', (newVital: any) => {
       if (newVital.source === 'camera') {
@@ -72,38 +106,53 @@ const CameraFeed = ({ patientId }: CameraFeedProps) => {
   const startCapture = async () => {
     // Clear previous errors
     setCameraError(null);
-    try {
-      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        setCameraError('Camera not supported in this browser. Use Chrome/Edge/Firefox on a secure context (localhost/HTTPS).');
-        return;
-      }
 
-      // Try more forgiving constraints — device may not support 1080p
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      setCameraError('Camera not supported in this browser. Use Chrome/Edge/Firefox on a secure context (localhost/HTTPS).');
+      return;
+    }
+
+    try {
       let stream;
+
+      // 1. First Attempt: 720p (HD)
       try {
-        stream = await navigator.mediaDevices.getUserMedia({
-          video: {
-            width: { ideal: 1280 },
-            height: { ideal: 720 }
-          }
-        });
-      } catch (err) {
-        // If we got overconstrained, try without constraints
-        const e = err as Error & { name?: string };
-        if (e && e.name === 'OverconstrainedError') {
+        const hdConstraints: MediaStreamConstraints = {
+          video: selectedDeviceId
+            ? { deviceId: { exact: selectedDeviceId }, width: { ideal: 1280 }, height: { ideal: 720 } }
+            : { width: { ideal: 1280 }, height: { ideal: 720 } }
+        };
+        stream = await navigator.mediaDevices.getUserMedia(hdConstraints);
+      } catch (err: any) {
+        console.warn("HD capture failed, trying fallbacks...", err.name);
+
+        // 2. Fallback Attempt: 480p (VGA)
+        try {
+          const vgaConstraints: MediaStreamConstraints = {
+            video: selectedDeviceId
+              ? { deviceId: { exact: selectedDeviceId }, width: { ideal: 640 }, height: { ideal: 480 } }
+              : { width: { ideal: 640 }, height: { ideal: 480 } }
+          };
+          stream = await navigator.mediaDevices.getUserMedia(vgaConstraints);
+          toast({ title: "Low Res Mode", description: "Switched to VGA resolution.", variant: "default" });
+        } catch (vgaErr) {
+          // 3. Ultimate Fallback: No resolution constraints (Let browser decide)
+          console.warn("VGA failed, trying minimal constraints...");
           try {
-            stream = await navigator.mediaDevices.getUserMedia({ video: true });
-          } catch (nestedErr) {
-            throw nestedErr;
+            const minimalConstraints: MediaStreamConstraints = {
+              video: selectedDeviceId ? { deviceId: { exact: selectedDeviceId } } : true
+            };
+            stream = await navigator.mediaDevices.getUserMedia(minimalConstraints);
+            toast({ title: "Minimal Mode", description: "Opened camera with default settings.", variant: "default" });
+          } catch (finalErr) {
+            throw finalErr; // All attempts failed
           }
-        } else {
-          throw err;
         }
       }
 
-      if (videoRef.current) {
+      if (videoRef.current && stream) {
         videoRef.current.srcObject = stream;
-        try { videoRef.current.play(); } catch (e) { /* ignore */ }
+        try { await videoRef.current.play(); } catch (e) { /* ignore */ }
         setIsCapturing(true);
 
         // Capture frame every 3 seconds
@@ -118,25 +167,29 @@ const CameraFeed = ({ patientId }: CameraFeedProps) => {
       }
     } catch (error) {
       // Provide more explicit error messages
-      const e = error as Error & { name?: string };
+      const e = error as Error & { name?: string; constraint?: string };
       console.error('Camera error', e);
-      let msg = 'Failed to access camera. Check your browser permissions/device.';
+      let msg = 'Failed to access camera.';
 
-      if (e && (e.name === 'NotAllowedError' || e.name === 'SecurityError' || e.name === 'PermissionDeniedError')) {
-        msg = 'Camera permission denied. Please allow camera access in your browser and try again.';
-      } else if (e && e.name === 'NotFoundError') {
-        msg = 'No camera device found. Attach or enable a camera, then retry.';
-      } else if (e && e.name === 'NotReadableError') {
-        msg = 'Camera is already in use by another application. Close other apps and try again.';
-      } else if (e && e.name === 'OverconstrainedError') {
-        msg = 'Camera does not support the requested resolution. Try a lower resolution or a different device.';
-      } else if (e?.message) {
-        msg = 'Failed to access camera: ' + e.message;
+      if (e) {
+        if (e.name === 'NotAllowedError' || e.name === 'SecurityError' || e.name === 'PermissionDeniedError') {
+          msg = 'Camera permission denied. Please allow access.';
+        } else if (e.name === 'NotFoundError') {
+          msg = 'Camera device not found.';
+        } else if (e.name === 'NotReadableError') {
+          msg = 'Camera is in use or USB bandwidth is full.';
+        } else if (e.name === 'OverconstrainedError') {
+          msg = `Resolution not supported${e.constraint ? ` (${e.constraint})` : ''}.`;
+        } else {
+          msg = `Error: ${e.name} - ${e.message}`;
+        }
+      } else {
+        msg = 'Unknown error occurred.';
       }
 
       setCameraError(msg);
       toast({
-        title: 'Camera error',
+        title: 'Camera Error',
         description: msg,
         variant: 'destructive',
       });
@@ -159,12 +212,80 @@ const CameraFeed = ({ patientId }: CameraFeedProps) => {
     setPreviewUrl(null);
   };
 
-  const captureAndProcess = async () => {
-    if (!videoRef.current || !canvasRef.current || isProcessing) return;
+  const workerRef = useRef<Worker | null>(null);
+
+  useEffect(() => {
+    // Initialize Web Worker
+    workerRef.current = new Worker(new URL('../workers/ocr.worker.ts', import.meta.url), { type: 'module' });
+
+    workerRef.current.onmessage = (e) => {
+      const { status, progress, message, result } = e.data;
+
+      if (status === 'initializing' || status === 'processing' || status === 'recognizing') {
+        setOcrProgress({ status, progress, message });
+      } else if (status === 'completed' && result) {
+        setOcrProgress(null);
+        setIsProcessing(false);
+
+        // Handle successful result
+        if (result.vitals && Object.values(result.vitals).some((v: any) => v !== null)) {
+          handleVitalsUpdate(result.vitals);
+        }
+      } else if (status === 'error') {
+        setOcrProgress(null);
+        setIsProcessing(false);
+        // console.error("Worker error:", message);
+      }
+    };
+
+    return () => {
+      workerRef.current?.terminate();
+    };
+  }, []);
+
+  const handleVitalsUpdate = async (vitals: any) => {
+    setLatestVitals(vitals);
+    setVitalsHistory(prev => {
+      const newHistory = [...prev, {
+        time: new Date().toLocaleTimeString(),
+        HR: vitals?.HR,
+        SpO2: vitals?.SpO2
+      }];
+      return newHistory.slice(-20);
+    });
+
+    // Save to backend
+    try {
+      await fetch('http://localhost:3000/api/vitals', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          patient_id: patientId,
+          hr: vitals.HR,
+          pulse: vitals.Pulse,
+          spo2: vitals.SpO2,
+          abp: vitals.ABP,
+          pap: vitals.PAP,
+          etco2: vitals.EtCO2,
+          awrr: vitals.awRR,
+          source: 'camera'
+        })
+      });
+    } catch (error) {
+      console.error('Failed to save vitals:', error);
+    }
+  };
+
+  const captureAndProcess = () => {
+    if (!videoRef.current || !canvasRef.current || isProcessing || !workerRef.current) return;
+
+    const video = videoRef.current;
+
+    // Check if video is ready
+    if (video.readyState !== 4) return;
 
     setIsProcessing(true);
 
-    const video = videoRef.current;
     const canvas = canvasRef.current;
     const ctx = canvas.getContext('2d');
 
@@ -178,58 +299,33 @@ const CameraFeed = ({ patientId }: CameraFeedProps) => {
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
     // Get image as base64
-    const imageBase64 = canvas.toDataURL('image/jpeg', 0.95);
+    const imageBase64 = canvas.toDataURL('image/jpeg', 0.8); // Slightly lower quality for speed
     setPreviewUrl(imageBase64);
 
-    // Use Tesseract OCR to extract vitals 
-    const ocrResult = await extractVitalsWithOCR(
+    // Offload to Worker
+    workerRef.current.postMessage({
       imageBase64,
-      monitorROIs,
-      (progress) => {
-        setOcrProgress(progress);
-      }
-    );
+      rois: monitorROIs
+    });
+  };
 
-    // Store in database if vitals were extracted
-    if (ocrResult.vitals && Object.values(ocrResult.vitals).some(v => v !== null)) {
-      try {
-        const response = await fetch('http://localhost:3000/api/vitals', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            patient_id: patientId,
-            hr: ocrResult.vitals.HR,
-            pulse: ocrResult.vitals.Pulse,
-            spo2: ocrResult.vitals.SpO2,
-            abp: ocrResult.vitals.ABP,
-            pap: ocrResult.vitals.PAP,
-            etco2: ocrResult.vitals.EtCO2,
-            awrr: ocrResult.vitals.awRR,
-            source: 'camera'
-          })
-        });
+  // Re-fetch function exposed to UI
+  const refreshDevices = async () => {
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const videoDevices = devices.filter(device => device.kind === 'videoinput');
+      setDevices(videoDevices);
 
-        if (response.ok) {
-          // Update latest vitals for display
-          setLatestVitals(ocrResult.vitals);
-          setVitalsHistory(prev => {
-            const newHistory = [...prev, {
-              time: new Date().toLocaleTimeString(),
-              HR: ocrResult.vitals?.HR,
-              SpO2: ocrResult.vitals?.SpO2
-            }];
-            return newHistory.slice(-20);
-          });
-        }
-      } catch (error) {
-        console.error('Failed to save vitals:', error);
+      // If no device acts as selected but we have devices, select the first one
+      if (videoDevices.length > 0 && !selectedDeviceId) {
+        setSelectedDeviceId(videoDevices[0].deviceId);
       }
+
+      toast({ title: "Devices Refreshed", description: `Found ${videoDevices.length} camera(s)` });
+    } catch (err) {
+      console.error("Error refreshing devices:", err);
+      toast({ title: "Refresh Failed", description: "Could not enumerate devices", variant: "destructive" });
     }
-
-    setIsProcessing(false);
-    setOcrProgress(null);
   };
 
   return (
@@ -243,7 +339,28 @@ const CameraFeed = ({ patientId }: CameraFeedProps) => {
             Live Camera Feed
           </h2>
 
-          <div className="flex gap-2">
+          <div className="flex gap-2 items-center">
+            {!isCapturing && (
+              <Button variant="ghost" size="icon" onClick={refreshDevices} title="Refresh Camera List" className="mr-2">
+                <RefreshCw className="w-4 h-4" />
+              </Button>
+            )}
+
+            {!isCapturing && devices.length > 0 && (
+              <Select value={selectedDeviceId} onValueChange={setSelectedDeviceId}>
+                <SelectTrigger className="w-[180px] bg-slate-900/50 border-slate-700 text-slate-200">
+                  <SelectValue placeholder="Select Camera" />
+                </SelectTrigger>
+                <SelectContent>
+                  {devices.map((device) => (
+                    <SelectItem key={device.deviceId} value={device.deviceId}>
+                      {device.label || `Camera ${devices.indexOf(device) + 1}`}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            )}
+
             {!isCapturing ? (
               <Button onClick={() => { setCameraError(null); startCapture(); }} className="bg-primary hover:bg-primary/90 rounded-full shadow-lg hover:shadow-primary/25 transition-all hover:scale-105">
                 <Camera className="w-4 h-4 mr-2" />

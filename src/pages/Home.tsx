@@ -26,10 +26,16 @@ const Home = () => {
           </div>
           <div className="flex items-center gap-4">
 
-            <Link to="/patients" className="animate-slide-in-right group" style={{ animationDelay: '0.1s' }}>
-              <Button className="bg-primary hover:bg-primary/90 text-primary-foreground shadow-lg hover:shadow-primary/25 transition-all hover:scale-105 rounded-full px-8 py-6 text-lg font-medium">
+            <Link to="/multicamera" className="animate-slide-in-right group" style={{ animationDelay: '0.1s' }}>
+              <Button variant="outline" className="border-primary/20 hover:bg-primary/5 text-primary hover:text-primary shadow-sm transition-all hover:scale-105 rounded-full px-6 py-2 text-sm font-medium">
+                Multi Camera View
+                <Camera className="ml-2 w-4 h-4 transition-transform group-hover:scale-110" />
+              </Button>
+            </Link>
+            <Link to="/patients" className="animate-slide-in-right group" style={{ animationDelay: '0.2s' }}>
+              <Button className="bg-primary hover:bg-primary/90 text-primary-foreground shadow-lg hover:shadow-primary/25 transition-all hover:scale-105 rounded-full px-6 py-2 text-sm font-medium">
                 Patient Records
-                <ArrowRight className="ml-2 w-5 h-5 transition-transform group-hover:translate-x-1" />
+                <ArrowRight className="ml-2 w-4 h-4 transition-transform group-hover:translate-x-1" />
               </Button>
             </Link>
           </div>
@@ -62,9 +68,16 @@ const Home = () => {
                     <span className="tracking-wide uppercase text-xs font-bold">Next-Gen Tele-ICU Platform</span>
                   </div>
 
-                  <h1 className="text-5xl md:text-6xl lg:text-7xl font-bold text-white leading-tight tracking-tight">
-                    e-<span className="text-transparent bg-clip-text bg-gradient-to-r from-primary to-secondary">Drishti</span>
-                  </h1>
+                  <div className="flex items-center gap-4">
+                    <img
+                      src="/e-Drishti (2).svg"
+                      alt="e-Drishti Logo"
+                      className="h-16 md:h-20 lg:h-24 w-auto drop-shadow-2xl"
+                    />
+                    <h1 className="text-5xl md:text-6xl lg:text-7xl font-bold text-white leading-tight tracking-tight">
+                      e-<span className="text-transparent bg-clip-text bg-gradient-to-r from-primary to-secondary">Drishti</span>
+                    </h1>
+                  </div>
 
                   <p className="text-slate-300 text-lg md:text-xl leading-relaxed max-w-xl font-light">
                     Revolutionizing critical care with real-time AI monitoring, instant vital extraction, and seamless patient management infrastructure.
